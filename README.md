@@ -1,4 +1,4 @@
 # Product-hype-predict
 
-Firsttry: Google Trends Data
-: Twitter Data
+Firsttry.py: Google Trends Data<br>
+TwitterFirsttry.py: Twitter Data
