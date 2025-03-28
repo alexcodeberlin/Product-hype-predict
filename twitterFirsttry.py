@@ -1,87 +1,92 @@
-import random
+import os
 import time
 import pandas as pd
 import matplotlib.pyplot as plt
-from pytrends.request import TrendReq
-import tweepy
 from textblob import TextBlob
+import tweepy
 from tweepy.errors import TooManyRequests
 
-
-# Use only the Bearer Token
-BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAAIawzwEAAAAAmdd1uV6UbfTX2P7Pmo6hY1Nqklw%3DBVKzB3gqkIdlKBXg21mVfMYmDXb86TfD7CxM0gtEY9PWgnWHlh"
+# Secure Bearer Token
+BEARER_TOKEN = "AAAAAAAAAAAAAAAAAAAAAC3H0AEAAAAAtpKfJ9410cXvoXPf3zsWg2mwPFU%3DwtjZJZcMPSm7UuvlLK8BzReihqz85txuu0d86M8smRPdeDCVsx"
 
 # Authenticate using OAuth 2.0
 client = tweepy.Client(bearer_token=BEARER_TOKEN)
 
-# Fetch recent tweets about the product
-def fetch_twitter_data(client, product, max_tweets=100):
-    """Fetch Twitter data related to the product."""
-    print(f"Fetching tweets about '{product}'...")
-    
-    tweets_data = []
-    backoff_time = 60  # Start with 1-minute backoff time
+# Fetch tweets with filtering for user followers count
+def fetch_twitter_data(client, product, max_tweets=10, min_followers=0):
+    """Fetch recent tweets about a product with optional follower filtering."""
+    print(f"\n🔍 Fetching up to {max_tweets} tweets about '{product}' (Min Followers: {min_followers})...\n")
 
-    while len(tweets_data) < max_tweets:
-        try:
-            # Fetch 100 tweets at a time
-            response = client.search_recent_tweets(query=product, max_results=100, tweet_fields=["created_at", "public_metrics", "author_id"])
-            
-            # Process the fetched tweets
-            for tweet in response.data:
-                sentiment = TextBlob(tweet.text).sentiment.polarity  # Basic sentiment score
-                
-                # Fetch user details using the author's ID
-                user = client.get_user(id=tweet.author_id)
-                
-                # Append the tweet data including user location if available
+    tweets_data = []
+
+    try:
+        response = client.search_recent_tweets(
+            query=f"{product} lang:en -is:retweet",
+            max_results=max_tweets,
+            tweet_fields=["created_at", "public_metrics", "author_id"],
+            user_fields=["location", "public_metrics"],
+            expansions=["author_id"]
+        )
+
+        if not response.data:
+            print("❌ No tweets found.")
+            return pd.DataFrame()
+
+        # Get user details
+        users = {user.id: {"location": user.location, "followers": user.public_metrics["followers_count"]}
+                 for user in response.includes.get("users", [])}
+
+        for tweet in response.data:
+            user_info = users.get(tweet.author_id, {"location": "Unknown", "followers": 0})
+
+            if user_info["followers"] >= min_followers:  # Filter by followers
+                sentiment = TextBlob(tweet.text).sentiment.polarity
+
                 tweets_data.append({
                     "tweet_id": tweet.id,
                     "timestamp": tweet.created_at,
-                    "user_location": user.location if user.location else "Unknown",  # Get location from user profile
                     "text": tweet.text,
                     "sentiment_score": sentiment,
-                    "likes": tweet.public_metrics['like_count'],
-                    "retweets": tweet.public_metrics['retweet_count']
+                    "likes": tweet.public_metrics.get("like_count", 0),
+                    "retweets": tweet.public_metrics.get("retweet_count", 0),
+                    "user_location": user_info["location"],
+                    "followers": user_info["followers"]
                 })
-            
-            # If we have fetched enough tweets, break the loop
-            if len(tweets_data) >= max_tweets:
-                break
 
-        except TooManyRequests as e:
-            # Handle rate limit by waiting until the retry time
-            print(f"Rate limit exceeded. Retrying after {e.response.headers['x-rate-limit-reset']} seconds.")
-            retry_after = int(e.response.headers['x-rate-limit-reset']) - int(time.time()) + 1
-            time.sleep(retry_after)
+    except TooManyRequests as e:
+        reset_time = int(e.response.headers.get("x-rate-limit-reset", time.time()))
+        wait_time = max(0, reset_time - int(time.time()) + 1)
+        print(f"🚨 Rate limit exceeded! Waiting {wait_time} seconds before retrying...")
+        time.sleep(wait_time)
+        return fetch_twitter_data(client, product, max_tweets, min_followers)
 
-    df = pd.DataFrame(tweets_data)
-    return df
+    return pd.DataFrame(tweets_data)
 
 # Save Twitter data to CSV
-def save_twitter_data_to_csv(df, product):
+def save_twitter_data_to_csv(df, filename):
     """Save tweet data to a CSV file."""
-    filename = f"{product}_twitter_data.csv"
+    if df.empty:
+        print("❌ No data to save.")
+        return
     df.to_csv(filename, index=False)
     print(f"✅ Saved Twitter data to {filename}")
 
 # Plot likes and retweets over time
-def plot_twitter_engagement(df, product):
+def plot_twitter_engagement(df, title):
     """Plot likes and retweets trends over time."""
-    plt.figure(figsize=(10, 5))
+    if df.empty:
+        print("❌ No data to plot.")
+        return
 
-    # Convert 'timestamp' to datetime for better plotting
+    plt.figure(figsize=(10, 5))
     df['timestamp'] = pd.to_datetime(df['timestamp'])
 
-    # Plot likes
     plt.plot(df["timestamp"], df["likes"], marker='o', linestyle='-', color='blue', label="Likes")
-    
-    # Plot retweets
     plt.plot(df["timestamp"], df["retweets"], marker='s', linestyle='-', color='red', label="Retweets")
 
     plt.xlabel("Time")
     plt.ylabel("Count")
-    plt.title(f"Tweet Engagement for '{product}'")
+    plt.title(f"📈 Tweet Engagement - {title}")
     plt.xticks(rotation=45)
     plt.legend()
     plt.grid()
@@ -89,13 +94,14 @@ def plot_twitter_engagement(df, product):
 
 # Run the script
 if __name__ == "__main__":
-    product = "iPhone"  # Change this to any product
+    product = "iPhone"
 
-    # Fetch Twitter data
-    twitter_data = fetch_twitter_data(client, product)
+    # First request: Fetch general tweets
+    general_tweets = fetch_twitter_data(client, product)
+    save_twitter_data_to_csv(general_tweets, f"{product}_general_tweets1.csv")
+    plot_twitter_engagement(general_tweets, "All Users")
 
-    # Save to CSV
-    save_twitter_data_to_csv(twitter_data, product)
-
-    # Plot engagement trends
-    plot_twitter_engagement(twitter_data, product)
+    # Second request: Fetch tweets from users with 500,000+ followers
+    influencer_tweets = fetch_twitter_data(client, product, min_followers=10000)
+    save_twitter_data_to_csv(influencer_tweets, f"{product}_influencer_tweets1.csv")
+    plot_twitter_engagement(influencer_tweets, "Influencers (500K+ Followers)")
